@@ -1,0 +1,512 @@
+---
+title: "PROJECT CROP"
+author: "21MIA1124"
+date: "16/09/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+#install.packages("randomForest")
+
+```
+```{r}
+#install.packages("arules")
+
+```
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(caret)
+library(randomForest)
+library(tidyverse)
+library(ggplot2)
+library(shiny)
+library(stringr)
+
+# Load the dataset (Ensure the paths are correct for all datasets)
+crop_recommendation_data <- read.csv("C:\\Users\\Narthana\\Downloads\\Crop Recommendation dataset.csv")
+crop_prediction_data <- read.csv("C:\\Users\\Narthana\\Downloads\\Crop Prediction dataset.csv")
+balram_data <- read.csv("C:\\Users\\Narthana\\Downloads\\balaram (2).csv")  
+
+# Data Preprocessing
+crop_recommendation_data$label <- as.factor(crop_recommendation_data$label)
+
+# Clean the data: Trim extra spaces from Season and District_Name columns
+crop_prediction_data$Season <- str_trim(crop_prediction_data$Season)
+crop_prediction_data$District_Name <- str_trim(crop_prediction_data$District_Name)
+
+# Handle missing production values
+crop_prediction_data <- crop_prediction_data %>%
+  mutate(Production = ifelse(is.na(Production), 0, Production))
+
+# Build the Random Forest model for crop recommendation
+set.seed(123)
+recommendation_model <- randomForest(label ~ ., data = crop_recommendation_data, ntree = 100)
+
+# Build the Random Forest model for crop yield prediction
+set.seed(123)
+trainIndex <- createDataPartition(crop_prediction_data$Production, p = 0.8, list = FALSE, times = 1)
+train_data <- crop_prediction_data[trainIndex, ]
+test_data <- crop_prediction_data[-trainIndex, ]
+prediction_model <- randomForest(Production ~ Temperature + Humidity + Soil_Moisture + Area + Crop, 
+                                 data = train_data, ntree = 100)
+
+# Function to recommend up to 3 crops with probabilities
+recommend_crops <- function(temperature, humidity, rainfall, ph, n = NA, p = NA, k = NA) {
+  new_data <- data.frame(
+    N = ifelse(is.na(n), mean(crop_recommendation_data$N, na.rm = TRUE), n),
+    P = ifelse(is.na(p), mean(crop_recommendation_data$P, na.rm = TRUE), p),
+    K = ifelse(is.na(k), mean(crop_recommendation_data$K, na.rm = TRUE), k),
+    temperature = temperature,
+    humidity = humidity,
+    rainfall = rainfall,
+    ph = ph
+  )
+  
+  predictions <- predict(recommendation_model, new_data, type = "prob")
+  pred_probs <- predictions[1, ]
+  sorted_probs <- sort(pred_probs, decreasing = TRUE)
+  top_crops <- names(sorted_probs)[1:min(3, length(sorted_probs))]
+  top_probs <- sorted_probs[1:min(3, length(sorted_probs))]
+  
+  return(list(crops = top_crops, probabilities = top_probs))
+}
+
+# Function to predict crop yield
+predict_yield <- function(temp, humidity, soil_moisture, area, crop) {
+  temp <- as.numeric(temp)
+  humidity <- as.numeric(humidity)
+  soil_moisture <- as.numeric(soil_moisture)
+  area <- as.numeric(area)
+  
+  if (is.na(temp) || is.na(humidity) || is.na(soil_moisture) || is.na(area)) {
+    return("Error: One or more input values are not numeric.")
+  }
+  
+  new_data <- data.frame(Temperature = temp, Humidity = humidity, 
+                         Soil_Moisture = soil_moisture, Area = area, Crop = crop)
+  prediction <- predict(prediction_model, new_data)
+  
+  test_predictions <- predict(prediction_model, test_data)
+  r2 <- cor(test_data$Production, test_predictions)^2
+  rmse <- sqrt(mean((test_data$Production - test_predictions)^2))
+  
+  return(list(prediction = prediction, r2 = r2, rmse = rmse))
+}
+
+# Function for seasonal yield forecast
+predict_best_crop <- function(season, region) {
+  # Clean the data: Trim extra spaces from Season and District_Name columns
+  crop_prediction_data$Season <- str_trim(crop_prediction_data$Season)
+  crop_prediction_data$District_Name <- str_trim(crop_prediction_data$District_Name)
+  
+  # Filter and find the best crop for the given season and region
+  best_crop <- crop_prediction_data %>% 
+    filter(Season == season, District_Name == region) %>% 
+    group_by(Crop) %>% 
+    summarise(avg_production = mean(Production, na.rm = TRUE)) %>% 
+    arrange(desc(avg_production)) %>% 
+    slice(1)
+  
+  if (nrow(best_crop) > 0) {
+    return(best_crop)
+  } else {
+    return(NULL)
+  }
+}
+
+# Function to calculate production efficiency
+calculate_efficiency <- function() {
+  efficiency <- crop_prediction_data %>% 
+    group_by(Crop) %>% 
+    summarise(avg_efficiency = mean(Production / Area, na.rm = TRUE))
+  return(efficiency)
+}
+
+# Function to impute missing production values
+impute_missing_production <- function(data) {
+  data$Production[is.na(data$Production)] <- mean(data$Production, na.rm = TRUE)
+  return(data)
+}
+
+# Function to recommend fertilizer and pesticide based on crop and seed name
+recommend_fertilizer_pesticide <- function(crop_name, seed_name) {
+  recommendation <- balram_data %>%
+    filter(crop_name == crop_name & seed_name == seed_name) %>%
+    select(fertilizer, pesticide) %>%
+    unique()
+  
+  if (nrow(recommendation) > 0) {
+    fertilizer_text <- recommendation$fertilizer[1]
+    pesticide_text <- recommendation$pesticide[1]
+    
+    # Organize and format the output
+    fertilizer_text <- str_wrap(fertilizer_text, width = 80)
+    pesticide_text <- str_wrap(pesticide_text, width = 80)
+    
+    return(list(fertilizer = fertilizer_text, pesticide = pesticide_text))
+  } else {
+    return("No specific fertilizer or pesticide recommendations found for this combination.")
+  }
+}
+
+# Function to retrieve crop details like seed rate, avg yield, location, and special feature
+crop_details <- function(crop_name, seed_name) {
+  details <- balram_data %>%
+    filter(crop_name == crop_name & seed_name == seed_name) %>%
+    select(seed_rate, avg_yeild, location, special_feature) %>%
+    unique()
+  
+  if (nrow(details) > 0) {
+    # Clean and organize the output
+    clean_output <- function(column_data) {
+      # Remove duplicate entries and extra spaces
+      unique_values <- unique(trimws(column_data))
+      return(paste(unique_values, collapse = "; "))
+    }
+    
+    seed_rate_clean <- clean_output(details$seed_rate)
+    avg_yield_clean <- clean_output(details$avg_yeild)
+    location_clean <- clean_output(details$location)
+    special_feature_clean <- clean_output(details$special_feature)
+    
+    # Create a list with organized details
+    organized_details <- list(
+      Seed_Rate = seed_rate_clean,
+      Average_Yield = avg_yield_clean,
+      Location = location_clean,
+      Special_Feature = special_feature_clean
+    )
+    
+    return(organized_details)
+  } else {
+    return("No details found for the specified crop and seed combination.")
+  }
+}
+
+# Updated Chatbot Interface with Improved Output Formatting
+chatbot <- function() {
+  while (TRUE) {
+    cat("\nWelcome to the Crop Prediction and Recommendation Chatbot!\n")
+    cat("Type '1' for Crop Recommendation\n")
+    cat("Type '2' to Predict Crop Yield\n")
+    cat("Type '3' for Seasonal Yield Forecast\n")
+    cat("Type '4' to Calculate Production Efficiency\n")
+    cat("Type '5' to Impute Missing Production Values\n")
+    cat("Type '6' for Fertilizer and Pesticide Recommendation\n")
+    cat("Type '7' for Crop Details\n")
+    cat("Type 'quit' to exit\n")
+    
+    choice <- readline(prompt = "Enter your choice: ")
+    
+    if (choice == '1') {
+      temp <- readline(prompt = "Enter Temperature: ")
+      humidity <- readline(prompt = "Enter Humidity: ")
+      rainfall <- readline(prompt = "Enter Rainfall: ")
+      ph <- readline(prompt = "Enter Soil pH: ")
+      n <- readline(prompt = "Enter Nitrogen level (or press Enter to skip): ")
+      p <- readline(prompt = "Enter Phosphorus level (or press Enter to skip): ")
+      k <- readline(prompt = "Enter Potassium level (or press Enter to skip): ")
+      
+      recommendations <- recommend_crops(as.numeric(temp), as.numeric(humidity), as.numeric(rainfall), as.numeric(ph), 
+                                         as.numeric(n), as.numeric(p), as.numeric(k))
+      cat("\nTop crop recommendations:\n")
+      for (i in seq_along(recommendations$crops)) {
+        cat(sprintf("%d. %s (%.2f%%)\n", i, recommendations$crops[i], recommendations$probabilities[i] * 100))
+      }
+    
+    } else if (choice == '2') {
+      temp <- readline(prompt = "Enter Temperature: ")
+      humidity <- readline(prompt = "Enter Humidity: ")
+      soil_moisture <- readline(prompt = "Enter Soil Moisture: ")
+      area <- readline(prompt = "Enter Area: ")
+      crop <- readline(prompt = "Enter Crop Type: ")
+      
+      result <- predict_yield(temp, humidity, soil_moisture, area, crop)
+      if (is.character(result)) {
+        cat(result, "\n")
+      } else {
+        cat("Predicted Crop Yield: ", result$prediction, "\n")
+        cat("Model Accuracy:\n")
+        cat("R2: ", result$r2, "\n")
+        cat("RMSE: ", result$rmse, "\n")
+      }
+    
+    } else if (choice == '3') {
+      season <- readline(prompt = "Enter Season: ")
+      region <- readline(prompt = "Enter Region: ")
+      
+      best_crop <- predict_best_crop(season, region)
+      if (!is.null(best_crop)) {
+        cat("Best Crop for the given season and region:\n")
+        print(best_crop)
+      } else {
+        cat("No data available for the specified season and region.\n")
+      }
+    
+    } else if (choice == '4') {
+      efficiency <- calculate_efficiency()
+      cat("Production Efficiency by Crop:\n")
+      print(efficiency)
+    
+    } else if (choice == '5') {
+      crop_prediction_data <- impute_missing_production(crop_prediction_data)
+      cat("Missing production values have been imputed.\n")
+    
+    } else if (choice == '6') {
+      crop_name <- readline(prompt = "Enter Crop Name: ")
+      seed_name <- readline(prompt = "Enter Seed Name: ")
+      
+      recommendation <- recommend_fertilizer_pesticide(crop_name, seed_name)
+      
+      if (is.character(recommendation)) {
+        cat(recommendation, "\n")
+      } else {
+        cat("\nFertilizer Recommendations:\n")
+        cat(recommendation$fertilizer, "\n")
+        cat("\nPesticide Recommendations:\n")
+        cat(recommendation$pesticide, "\n")
+      }
+    
+    } else if (choice == '7') {
+      crop_name <- readline(prompt = "Enter Crop Name: ")
+      seed_name <- readline(prompt = "Enter Seed Name: ")
+      
+      details <- crop_details(crop_name, seed_name)
+      if (is.character(details)) {
+        cat(details, "\n")
+      } else {
+        cat("Seed Rate: ", details$Seed_Rate, "\n")
+        cat("Average Yield: ", details$Average_Yield, "\n")
+        cat("Location: ", details$Location, "\n")
+        cat("Special Feature: ", details$Special_Feature, "\n")
+      }
+    
+    } else if (tolower(choice) == 'quit') {
+      cat("Exiting the chatbot. Have a great day!\n")
+      break
+    
+    } else {
+      cat("Invalid choice. Please try again.\n")
+    }
+  }
+}
+
+# Start the chatbot
+chatbot()
+
+
+```
+```{r}
+# Print column names of each dataset
+cat("Columns in Crop Recommendation Dataset:\n")
+print(colnames(crop_recommendation_data))
+
+cat("\nColumns in Crop Prediction Dataset:\n")
+print(colnames(crop_prediction_data))
+
+cat("\nColumns in Balram Dataset:\n")
+print(colnames(balram_data))
+
+```
+
+```{r}
+# Load the datasets
+crop_recommendation_data <- read.csv("C:\\Users\\Narthana\\Downloads\\Crop Recommendation dataset.csv")
+crop_prediction_data <- read.csv("C:\\Users\\Narthana\\Downloads\\Crop Prediction dataset.csv")
+balram_data <- read.csv("C:\\Users\\Narthana\\Downloads\\balaram (2).csv")
+
+# Get the number of records in each dataset
+record_counts <- data.frame(
+  Dataset = c("Crop Recommendation", "Crop Prediction", "Balram"),
+  Records = c(nrow(crop_recommendation_data), nrow(crop_prediction_data), nrow(balram_data))
+)
+
+# Print the record counts
+print(record_counts)
+
+```
+
+```{r}
+library(ggplot2)
+
+# Create a data frame with dataset names and record counts
+record_counts <- data.frame(
+  Dataset = c("Crop Recommendation", "Crop Prediction", "Balram"),
+  Records = c(nrow(crop_recommendation_data), nrow(crop_prediction_data), nrow(balram_data))
+)
+
+# Plot total records
+ggplot(record_counts, aes(x = Dataset, y = Records, fill = Dataset)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Total Records in Each Dataset", x = "Dataset", y = "Number of Records")
+
+```
+```{r}
+# Extract unique crop names from relevant datasets
+unique_crops <- unique(c(crop_recommendation_data$label, crop_prediction_data$Crop, balram_data$crop_name))
+
+# Create a data frame for visualization
+unique_crops_df <- data.frame(Crop = unique_crops)
+
+# Visualize unique crops
+ggplot(unique_crops_df, aes(x = reorder(Crop, -table(Crop)), fill = Crop)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Unique Crop Names", x = "Crop Name", y = "Frequency") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+```{r}
+# Ensure that 'crop_name' and 'seed_name' are character vectors
+balram_data$crop_name <- as.character(balram_data$crop_name)
+balram_data$seed_name <- as.character(balram_data$seed_name)
+
+# Get unique seed names for each crop
+unique_seeds_per_crop <- aggregate(seed_name ~ crop_name, data = balram_data, FUN = function(x) paste(unique(x), collapse = ", "))
+
+# Print the result
+print(unique_seeds_per_crop)
+
+```
+```{r}
+# Crop Recommendation Dataset
+
+summary(crop_recommendation_data)
+
+```
+```{r}
+colSums(is.na(crop_recommendation_data))
+
+```
+
+```{r}
+library(ggplot2)
+library(reshape2)
+corr_matrix <- cor(crop_recommendation_data[, -ncol(crop_recommendation_data)]) # Exclude the label column
+melted_corr <- melt(corr_matrix)
+ggplot(data = melted_corr, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low="blue", high="red", mid="white", midpoint=0) +
+  theme_minimal() + 
+  labs(title="Correlation Heatmap", x="Features", y="Features")
+
+```
+```{r}
+ggplot(crop_recommendation_data, aes(x=label)) + 
+  geom_bar(fill="skyblue") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1)) +
+  labs(title="Distribution of Recommended Crops", x="Crop Type", y="Count")
+
+```
+```{r}
+ggplot(crop_recommendation_data, aes(x=label, y=rainfall, color=label)) + 
+  geom_jitter(width=0.2, alpha=0.6, size=2) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1)) + 
+  labs(title="Rainfall vs. Crop Type", x="Crop Type", y="Rainfall (mm)") + 
+  scale_color_discrete(name="Crop Type") + 
+  theme_minimal()
+
+
+```
+```{r}
+ggplot(crop_recommendation_data, aes(x=label, y=temperature, color=label)) + 
+  geom_jitter(width=0.2, alpha=0.6, size=2) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1)) + 
+  labs(title="Temperature vs. Crop Type", x="Crop Type", y="Temperature (°C)") + 
+  scale_color_discrete(name="Crop Type") + 
+  theme_minimal()
+
+```
+```{r}
+ggplot(crop_recommendation_data, aes(x=label, y=humidity, color=label)) + 
+  geom_jitter(width=0.2, alpha=0.6, size=2) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1)) + 
+  labs(title="Humidity vs. Crop Type", x="Crop Type", y="Humidity (%)") + 
+  scale_color_discrete(name="Crop Type") + 
+  theme_minimal()
+
+```
+```{r}
+ggplot(crop_recommendation_data, aes(x=label, y=ph, color=label)) + 
+  geom_jitter(width=0.2, alpha=0.6, size=2) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1)) + 
+  labs(title="pH Level vs. Crop Type", x="Crop Type", y="pH Level") + 
+  scale_color_discrete(name="Crop Type") + 
+  theme_minimal()
+
+```
+```{r}
+ # Prediction Dataset
+summary(crop_prediction_data)
+
+```
+```{r}
+colSums(is.na(crop_prediction_data))
+
+```
+```{r}
+crop_prediction_data <- na.omit(crop_prediction_data)
+
+```
+
+
+```{r}
+ggplot(crop_prediction_data, aes(x=Crop_Year, y=Production, color=Crop)) + 
+  geom_line() + 
+  labs(title="Crop Production Over the Years", x="Year", y="Production (in tons)") +
+  theme_minimal()
+
+```
+```{r}
+library(dplyr)
+
+top_crops <- crop_prediction_data %>%
+  group_by(Crop) %>%
+  summarise(Total_Area = sum(Area)) %>%
+  arrange(desc(Total_Area)) %>%
+  head(5)
+
+ggplot(top_crops, aes(x=reorder(Crop, -Total_Area), y=Total_Area)) + 
+  geom_bar(stat="identity", fill="green") +
+  labs(title="Top 5 Crops by Area", x="Crop", y="Total Area") +
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+
+```
+```{r}
+ggplot(crop_prediction_data, aes(x=Area, y=Production, color=Season)) + 
+  geom_point(alpha=0.7) +
+  labs(title="Production vs Area for Different Seasons", x="Area (in hectares)", y="Production (in tons)") +
+  theme_minimal()
+
+```
+```{r}
+#Balram Dataset
+summary(balram_data)
+
+```
+```{r}
+colSums(is.na(balram_data))
+
+```
+```{r}
+balram_data <- na.omit(balram_data)
+
+```
+
+
+
+
